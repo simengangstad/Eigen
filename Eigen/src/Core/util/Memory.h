@@ -147,7 +147,7 @@ inline void* handmade_aligned_realloc(void* ptr, std::size_t size, std::size_t =
   void *original = *(reinterpret_cast<void**>(ptr) - 1);
   std::ptrdiff_t previous_offset = static_cast<char *>(ptr)-static_cast<char *>(original);
   #ifdef EIGEN_USE_CUSTOM_ALLOCATOR
-  original = custom_realloc(original,size+EIGEN_DEFAULT_ALIGN_BYTES);
+  original = eigen_custom_realloc(original,size+EIGEN_DEFAULT_ALIGN_BYTES);
   #else
   original = std::realloc(original,size+EIGEN_DEFAULT_ALIGN_BYTES);
   #endif
