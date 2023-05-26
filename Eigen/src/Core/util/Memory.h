@@ -96,75 +96,6 @@ inline void throw_std_bad_alloc()
   #endif
 }
 
-/*****************************************************************************
-*** Implementation of handmade aligned functions                           ***
-*****************************************************************************/
-
-/* ----- Hand made implementations of aligned malloc/free and realloc ----- */
-
-/** \internal Like malloc, but the returned pointer is guaranteed to be 16-byte aligned.
-  * Fast, but wastes 16 additional bytes of memory. Does not throw any exception.
-  */
-EIGEN_DEVICE_FUNC inline void* handmade_aligned_malloc(std::size_t size, std::size_t alignment = EIGEN_DEFAULT_ALIGN_BYTES)
-{
-  eigen_assert(alignment >= sizeof(void*) && (alignment & (alignment-1)) == 0 && "Alignment must be at least sizeof(void*) and a power of 2");
-
-  #ifdef EIGEN_USE_CUSTOM_ALLOCATOR 
-  void *original = eigen_custom_malloc(size+alignment);
-  #else
-  EIGEN_USING_STD(malloc)
-  void *original = malloc(size+alignment);
-  #endif
-
-  
-  if (original == 0) return 0;
-  void *aligned = reinterpret_cast<void*>((reinterpret_cast<std::size_t>(original) & ~(std::size_t(alignment-1))) + alignment);
-  *(reinterpret_cast<void**>(aligned) - 1) = original;
-  return aligned;
-}
-
-/** \internal Frees memory allocated with handmade_aligned_malloc */
-EIGEN_DEVICE_FUNC inline void handmade_aligned_free(void *ptr)
-{
-  if (ptr) {
-    #ifdef EIGEN_USE_CUSTOM_ALLOCATOR
-    eigen_custom_free(*(reinterpret_cast<void**>(ptr) - 1));
-    #else
-    EIGEN_USING_STD(free)
-    free(*(reinterpret_cast<void**>(ptr) - 1));
-    #endif
-  }
-}
-
-/** \internal
-  * \brief Reallocates aligned memory.
-  * Since we know that our handmade version is based on std::malloc
-  * we can use std::realloc to implement efficient reallocation.
-  */
-inline void* handmade_aligned_realloc(void* ptr, std::size_t size, std::size_t = 0)
-{
-  if (ptr == 0) return handmade_aligned_malloc(size);
-  void *original = *(reinterpret_cast<void**>(ptr) - 1);
-  std::ptrdiff_t previous_offset = static_cast<char *>(ptr)-static_cast<char *>(original);
-  #ifdef EIGEN_USE_CUSTOM_ALLOCATOR
-  original = eigen_custom_realloc(original,size+EIGEN_DEFAULT_ALIGN_BYTES);
-  #else
-  original = std::realloc(original,size+EIGEN_DEFAULT_ALIGN_BYTES);
-  #endif
-  if (original == 0) return 0;
-  void *aligned = reinterpret_cast<void*>((reinterpret_cast<std::size_t>(original) & ~(std::size_t(EIGEN_DEFAULT_ALIGN_BYTES-1))) + EIGEN_DEFAULT_ALIGN_BYTES);
-  void *previous_aligned = static_cast<char *>(original)+previous_offset;
-  if(aligned!=previous_aligned)
-    std::memmove(aligned, previous_aligned, size);
-
-  *(reinterpret_cast<void**>(aligned) - 1) = original;
-  return aligned;
-}
-
-/*****************************************************************************
-*** Implementation of portable aligned versions of malloc/free/realloc     ***
-*****************************************************************************/
-
 #ifdef EIGEN_NO_MALLOC
 EIGEN_DEVICE_FUNC inline void check_that_malloc_is_allowed()
 {
@@ -188,6 +119,95 @@ EIGEN_DEVICE_FUNC inline void check_that_malloc_is_allowed()
 EIGEN_DEVICE_FUNC inline void check_that_malloc_is_allowed()
 {}
 #endif
+
+/*****************************************************************************
+*** Implementation of handmade aligned functions                           ***
+*****************************************************************************/
+
+/* ----- Hand made implementations of aligned malloc/free and realloc ----- */
+
+/** \internal Like malloc, but the returned pointer is guaranteed to be 16-byte aligned.
+  * Fast, but wastes 16 additional bytes of memory. Does not throw any exception.
+  */
+EIGEN_DEVICE_FUNC inline void* handmade_aligned_malloc(std::size_t size, std::size_t alignment = EIGEN_DEFAULT_ALIGN_BYTES)
+{
+  eigen_assert(alignment >= sizeof(void*) && (alignment & (alignment-1)) == 0 && "Alignment must be at least sizeof(void*) and a power of 2");
+
+  #ifdef EIGEN_USE_CUSTOM_ALLOCATOR 
+  void *original = eigen_custom_malloc(size+alignment);
+  #else
+  EIGEN_USING_STD(malloc)
+  void *original = malloc(size+alignment);
+  #endif
+
+  
+  if (original == 0) return 0;
+  uint8_t offset = static_cast<uint8_t>(alignment - (reinterpret_cast<std::size_t>(original) & (alignment - 1)));
+  void* aligned = static_cast<void*>(static_cast<uint8_t*>(original) + offset);
+  *(static_cast<uint8_t*>(aligned) - 1) = offset;
+
+  return aligned;
+}
+
+/** \internal Frees memory allocated with handmade_aligned_malloc */
+EIGEN_DEVICE_FUNC inline void handmade_aligned_free(void *ptr)
+{
+  if (ptr) {
+    uint8_t offset = static_cast<uint8_t>(*(static_cast<uint8_t*>(ptr) - 1));
+    void* original = static_cast<void*>(static_cast<uint8_t*>(ptr) - offset);
+
+    check_that_malloc_is_allowed();
+
+    #ifdef EIGEN_USE_CUSTOM_ALLOCATOR
+    eigen_custom_free(original);
+    #else
+    EIGEN_USING_STD(free)
+    free(original);
+    #endif
+  }
+}
+
+/** \internal
+  * \brief Reallocates aligned memory.
+  * Since we know that our handmade version is based on std::malloc
+  * we can use std::realloc to implement efficient reallocation.
+  */
+EIGEN_DEVICE_FUNC inline void* handmade_aligned_realloc(void* ptr, std::size_t new_size, std::size_t old_size, std::size_t alignment = EIGEN_DEFAULT_ALIGN_BYTES)
+{
+  if (ptr == nullptr) return handmade_aligned_malloc(new_size, alignment);
+  uint8_t old_offset = *(static_cast<uint8_t*>(ptr) - 1);
+  void* old_original = static_cast<uint8_t*>(ptr) - old_offset;
+
+  check_that_malloc_is_allowed();
+
+  #ifdef EIGEN_USE_CUSTOM_ALLOCATOR
+  void* original = eigen_custom_realloc(old_original,new_size + alignment);
+  #else
+  void* original = std::realloc(old_original, new_size + alignment);
+  #endif
+
+  if (original == nullptr) return nullptr;
+  if (original == old_original) return ptr;
+
+  uint8_t offset = static_cast<uint8_t>(alignment - (reinterpret_cast<std::size_t>(original) & (alignment - 1)));
+  void* aligned = static_cast<void*>(static_cast<uint8_t*>(original) + offset);
+
+  if (offset != old_offset) {
+    const void* src = static_cast<const void*>(static_cast<uint8_t*>(original) + old_offset);
+    std::size_t count = (std::min)(new_size, old_size);
+    std::memmove(aligned, src, count);
+  }
+
+  *(static_cast<uint8_t*>(aligned) - 1) = offset;
+
+  return aligned;
+}
+
+/*****************************************************************************
+*** Implementation of portable aligned versions of malloc/free/realloc     ***
+*****************************************************************************/
+
+
 
 /** \internal Allocates \a size bytes. The returned pointer is guaranteed to have 16 or 32 bytes alignment depending on the requirements.
   * On allocation error, the returned pointer is null, and std::bad_alloc is thrown.
